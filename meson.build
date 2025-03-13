@@ -8,7 +8,7 @@ fmt_sub = subproject('fmt')
 fmt_dep = fmt_sub.get_variable('fmt_dep')
 
 concurrency_sub = subproject('cpp-baremetal-concurrency')
-concurrency_dep = intel_concurrency_sub.get_variable('baremetal_concurrency_dep')
+concurrency_dep = concurrency_sub.get_variable('baremetal_concurrency_dep')
 
 inc = include_directories('include')
 
