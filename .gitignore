@@ -16,3 +16,5 @@ __pycache__
 .hypothesis
 requirements.txt
 docs/puppeteer_config.json
+/subprojects/*/
+!/subprojects/*.wrap
