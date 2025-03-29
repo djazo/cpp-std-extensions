@@ -18,3 +18,4 @@ requirements.txt
 docs/puppeteer_config.json
 /subprojects/*/
 !/subprojects/*.wrap
+.meson-subproject-wrap-hash.txt
