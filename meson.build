@@ -4,7 +4,7 @@ boostmp11_sub = subproject('boostmp11')
 boostmp11_dep = boostmp11_sub.get_variable('boostmp11_dep')
 
 fmt_sub = subproject('fmt',
-  default_options: ['header-only'])
+  default_options: ['header-only=true'])
 fmt_dep = fmt_sub.get_variable('fmt_dep')
 
 baremetal_concurrency_sub = subproject('cpp-baremetal-concurrency')
