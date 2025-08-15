@@ -145,6 +145,8 @@ struct from_any {
     constexpr operator int() const { return 0; }
 };
 
+struct value_marker {};
+
 struct type_val {
     template <typename T, typename U,
               typename = std::enable_if_t<same_as_unqualified<type_val, U>>>
@@ -152,6 +154,14 @@ struct type_val {
         return t;
     }
     friend constexpr auto operator+(type_val const &f) -> type_val { return f; }
+
+    template <typename T, typename U,
+              typename = std::enable_if_t<same_as_unqualified<type_val, U>>>
+    friend constexpr auto operator-(T, U const &) -> value_marker {
+        return {};
+    }
+    friend constexpr auto operator-(type_val const &f) -> type_val { return f; }
+
     // NOLINTNEXTLINE(google-explicit-constructor)
     template <typename T> constexpr operator T() const {
         if constexpr (std::is_default_constructible_v<T>) {
@@ -164,7 +174,7 @@ struct type_val {
 };
 
 template <typename> constexpr inline auto is_type = true;
-template <> constexpr inline auto is_type<from_any> = false;
+template <> constexpr inline auto is_type<value_marker> = false;
 
 class cx_base {
     struct unusable {};
@@ -226,8 +236,8 @@ template <typename T> constexpr auto is_ct_v<T const> = is_ct_v<T>;
 
 #ifndef STDX_IS_TYPE
 #define STDX_IS_TYPE(...)                                                      \
-    ::stdx::cxv_detail::is_type<__typeof__(::stdx::cxv_detail::from_any(       \
-        __VA_ARGS__))>
+    ::stdx::cxv_detail::is_type<decltype((__VA_ARGS__) -                       \
+                                         ::stdx::cxv_detail::type_val{})>
 #endif
 
 #ifndef CX_VALUE
@@ -267,26 +277,23 @@ template <typename T> constexpr auto is_ct_v<T const> = is_ct_v<T>;
     }([&]() constexpr { return __VA_ARGS__; })
 #endif
 
-#ifndef CX_DETECT
-#ifdef __clang__
-#define CX_DETECT(...)                                                         \
-    std::is_empty_v<decltype([&] {                                             \
-        return (__VA_ARGS__) + ::stdx::cxv_detail::type_val{};                 \
-    })>
-#else
 namespace stdx {
 inline namespace v1 {
-template <auto> constexpr auto cx_detect0() {}
-constexpr auto cx_detect1(auto) { return 0; }
+namespace cxv_detail {
+template <auto> constexpr auto cx_sfinae = std::true_type{};
+
+#ifdef __clang__
+auto cx_detect(auto f) -> decltype(cx_sfinae<from_any{f()}>);
+auto cx_detect(...) -> std::false_type;
+#else
+auto cx_detect(auto f) {
+    constexpr auto b = requires { cx_sfinae<from_any{f()}>; };
+    return std::bool_constant<b>{};
+}
+#endif
+} // namespace cxv_detail
 } // namespace v1
 } // namespace stdx
-#define CX_DETECT(...)                                                         \
-    requires {                                                                 \
-        ::stdx::cx_detect0<::stdx::cx_detect1(                                 \
-            (__VA_ARGS__) + ::stdx::cxv_detail::type_val{})>;                  \
-    }
-#endif
-#endif
 
 #ifndef CX_WRAP
 #define CX_WRAP(...)                                                           \
@@ -300,7 +307,8 @@ constexpr auto cx_detect1(auto) { return 0; }
                              std::is_empty_v<                                  \
                                  std::invoke_result_t<decltype(f)>>) {         \
             return f();                                                        \
-        } else if constexpr (CX_DETECT(__VA_ARGS__)) {                         \
+        } else if constexpr (decltype(::stdx::cxv_detail::cx_detect(           \
+                                 f))::value) {                                 \
             return ::stdx::overload{::stdx::cxv_detail::cx_base{}, f};         \
         } else {                                                               \
             return f();                                                        \
