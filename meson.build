@@ -1,4 +1,4 @@
-project('stdx', ['cpp'], default_options: ['cpp_std=c++20'])
+project('stdx', ['cpp'], default_options: ['cpp_std=c++23'])
 
 boostmp11_sub = subproject('boostmp11')
 boostmp11_dep = boostmp11_sub.get_variable('boostmp11_dep')
