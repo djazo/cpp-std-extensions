@@ -13,8 +13,11 @@
 #include <stdx/type_traits.hpp>
 #include <stdx/utility.hpp>
 
+#include <boost/mp11/algorithm.hpp>
+
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <iterator>
 #include <string_view>
 #include <utility>
@@ -25,12 +28,51 @@ template <std::size_t N> constexpr auto format_as(stdx::ct_string<N> const &s) {
     return std::string_view{s};
 }
 
-template <typename Str, typename Args> struct format_result {
+template <stdx::ct_string Name, typename T, int Begin, int End = Begin - 1>
+struct named_arg {
+    using type = T;
+    constexpr static auto name = Name;
+    constexpr static auto begin = Begin;
+    constexpr static auto end = End;
+
+    constexpr static std::integral_constant<bool, (End < Begin)> is_runtime{};
+
+    template <int StringOffset, int ArgOffset>
+    CONSTEVAL static auto apply_offset() {
+        if constexpr (is_runtime) {
+            return named_arg<Name, T, Begin + ArgOffset, End + ArgOffset>{};
+        } else {
+            return named_arg<Name, T, Begin + StringOffset,
+                             End + StringOffset>{};
+        }
+    }
+
+  private:
+    friend constexpr auto operator==(named_arg const &, named_arg const &)
+        -> bool = default;
+};
+
+namespace detail {
+template <std::size_t StringOffset, std::size_t ArgOffset>
+struct apply_span_offset_q {
+    template <typename Arg>
+    using fn = decltype(Arg::template apply_offset<StringOffset, ArgOffset>());
+};
+
+template <std::size_t StringOffset, std::size_t ArgOffset, typename L>
+using apply_offset =
+    boost::mp11::mp_transform_q<apply_span_offset_q<StringOffset, ArgOffset>,
+                                L>;
+} // namespace detail
+
+template <typename Str, typename Args, typename NamedArgs>
+struct format_result {
     CONSTEVAL static auto ct_string_convertible()
         -> std::bool_constant<Args::size() == 0>;
 
     [[no_unique_address]] Str str;
     [[no_unique_address]] Args args{};
+    using named_args_t = NamedArgs;
 
     friend constexpr auto operator+(format_result const &fr)
         requires(decltype(ct_string_convertible())::value)
@@ -49,13 +91,14 @@ template <typename Str, typename Args> struct format_result {
                                      format_result const &) -> bool = default;
 };
 
-template <typename Str, typename Args>
+template <typename Str, typename Args, typename NamedArgs>
     requires(Args::size() == 0 and is_cx_value_v<Str>)
-struct format_result<Str, Args> {
+struct format_result<Str, Args, NamedArgs> {
     CONSTEVAL static auto ct_string_convertible() -> std::true_type;
 
     [[no_unique_address]] Str str;
     [[no_unique_address]] Args args{};
+    using named_args_t = NamedArgs;
 
     friend constexpr auto operator+(format_result const &fr) { return +fr.str; }
 
@@ -67,14 +110,16 @@ struct format_result<Str, Args> {
                                      format_result const &) -> bool = default;
 };
 
-template <typename Str, typename Args>
-format_result(Str, Args) -> format_result<Str, Args>;
-template <typename Str> format_result(Str) -> format_result<Str, tuple<>>;
+template <typename NamedArgs = type_list<>, typename Str,
+          typename Args = tuple<>>
+constexpr auto make_format_result(Str s, Args args = {}) {
+    return format_result<Str, Args, NamedArgs>{s, std::move(args)};
+}
 
 inline namespace literals {
 inline namespace ct_string_literals {
 template <ct_string S> CONSTEVAL_UDL auto operator""_fmt_res() {
-    return format_result{cts_t<S>{}};
+    return make_format_result(cts_t<S>{});
 }
 } // namespace ct_string_literals
 } // namespace literals
@@ -104,10 +149,19 @@ CONSTEVAL auto count_specifiers(std::string_view fmt) -> std::size_t {
     return count;
 }
 
+struct split_spec {
+    std::string_view view;
+    std::size_t start{};
+
+  private:
+    friend constexpr auto operator==(split_spec const &, split_spec const &)
+        -> bool = default;
+};
+
 template <std::size_t N>
 CONSTEVAL auto split_specifiers(std::string_view fmt)
-    -> std::array<std::string_view, N> {
-    auto splits = std::array<std::string_view, N>{};
+    -> std::array<split_spec, N> {
+    auto splits = std::array<split_spec, N>{};
     auto count = std::size_t{};
 
     auto split_start = fmt.begin();
@@ -117,13 +171,61 @@ CONSTEVAL auto split_specifiers(std::string_view fmt)
         if (split_end != fmt.end()) {
             ++split_end;
         }
-        splits[count++] = std::string_view{split_start, split_end};
+        splits[count++] = {
+            std::string_view{split_start, split_end},
+            static_cast<std::size_t>(std::distance(split_start, spec_start))};
         split_start = split_end;
         spec_start = find_spec(split_start, fmt.end());
     }
-    splits[count++] = std::string_view{split_start, spec_start};
+    splits[count++] = {
+        std::string_view{split_start, spec_start},
+        static_cast<std::size_t>(std::distance(split_start, spec_start))};
 
     return splits;
+}
+
+template <ct_string S, std::size_t Start> CONSTEVAL auto extract_format1_str() {
+    constexpr auto name_start = Start + 1;
+    constexpr auto it = [] {
+        for (auto i = S.value.cbegin() + name_start; i != S.value.cend(); ++i) {
+            if (*i == ':') {
+                return i;
+            }
+        }
+        return S.value.cend();
+    }();
+    if constexpr (it == S.value.cend()) {
+        if constexpr (Start == S.size() - 2) {
+            // no name, empty fmt spec e.g. "abc{}"
+            return std::pair{S, ct_string{""}};
+        } else {
+            // named arg, empty fmt spec, e.g. "abc{ghi}"
+            constexpr auto suffix_start = S.size() - 1;
+            constexpr auto prefix_size = name_start;
+            constexpr auto name_size = suffix_start - name_start;
+            constexpr auto suffix_size = 1;
+
+            return std::pair{
+                ct_string<prefix_size + 1U>{S.value.cbegin(), prefix_size} +
+                    ct_string<suffix_size + 1U>{S.value.cbegin() + suffix_start,
+                                                suffix_size},
+                ct_string<name_size + 1U>{S.value.cbegin() + name_start,
+                                          name_size}};
+        }
+    } else {
+        // named arg, fmt spec, e.g. "abc{ghi:x}"
+        constexpr auto suffix_start = it - S.value.cbegin();
+        constexpr auto prefix_size = name_start;
+        constexpr auto name_size = suffix_start - name_start;
+        constexpr auto suffix_size = S.size() - suffix_start;
+
+        return std::pair{
+            ct_string<prefix_size + 1U>{S.value.cbegin(), prefix_size} +
+                ct_string<suffix_size + 1U>{S.value.cbegin() + suffix_start,
+                                            suffix_size},
+            ct_string<name_size + 1U>{S.value.cbegin() + name_start,
+                                      name_size}};
+    }
 }
 
 template <typename T>
@@ -146,30 +248,55 @@ template <typename T> CONSTEVAL auto arg_value(type_identity<T>) {
 template <ct_string S> CONSTEVAL auto arg_value(cts_t<S>) { return S; }
 
 CONSTEVAL auto arg_value(fmt_cx_value auto a) {
-    if constexpr (requires { ct_string_from_type(a); }) {
+    if constexpr (is_specialization_of_v<decltype(a), format_result>) {
+        return a;
+    } else if constexpr (requires { arg_value(a()); }) {
+        return arg_value(a());
+    } else if constexpr (requires { ct_string_from_type(a); }) {
         return ct_string_from_type(a);
     } else if constexpr (std::is_enum_v<decltype(a())>) {
         return enum_as_string<a()>();
-    } else if constexpr (requires { arg_value(a()); }) {
-        return arg_value(a());
     } else {
         return a();
     }
 }
 
-template <typename T, typename U, typename S>
-constexpr auto operator+(format_result<T, U> r, S s) {
-    return format_result{r.str + s, r.args};
+template <typename T> CONSTEVAL auto arg_type(T) -> T;
+
+template <typename T, T V>
+CONSTEVAL auto arg_type(std::integral_constant<T, V>) -> T;
+
+CONSTEVAL auto arg_type(fmt_cx_value auto a) {
+    if constexpr (requires { ct_string_from_type(a); }) {
+        return ct_string_from_type(a);
+    } else {
+        return a();
+    }
 }
 
-template <typename S, typename T, typename U>
-constexpr auto operator+(S s, format_result<T, U> r) {
-    return format_result{s + r.str, r.args};
+template <typename Str, typename Args, typename NamedArgs, typename S>
+constexpr auto operator+(format_result<Str, Args, NamedArgs> r, S s) {
+    return make_format_result<NamedArgs>(r.str + s, std::move(r.args));
 }
 
-template <typename A, typename B, typename T, typename U>
-constexpr auto operator+(format_result<A, B> r1, format_result<T, U> r2) {
-    return format_result{r1.str + r2.str, tuple_cat(r1.args, r2.args)};
+template <typename S, typename Str, typename Args, typename NamedArgs>
+constexpr auto operator+(S s, format_result<Str, Args, NamedArgs> r) {
+    return make_format_result<detail::apply_offset<s.size(), 0, NamedArgs>>(
+        s + r.str, std::move(r.args));
+}
+
+template <typename Str1, typename Args1, typename NamedArgs1, typename Str2,
+          typename Args2, typename NamedArgs2>
+constexpr auto operator+(format_result<Str1, Args1, NamedArgs1> r1,
+                         format_result<Str2, Args2, NamedArgs2> r2) {
+    using ShiftedNamedArgs2 =
+        detail::apply_offset<r1.str.size(), boost::mp11::mp_size<Args1>::value,
+                             NamedArgs2>;
+
+    return make_format_result<
+        boost::mp11::mp_append<NamedArgs1, ShiftedNamedArgs2>>(
+        r1.str + r2.str,
+        stdx::tuple_cat(std::move(r1.args), std::move(r2.args)));
 }
 
 template <typename T, T...> struct null_output;
@@ -197,32 +324,50 @@ CONSTEVAL auto convert_output() {
 }
 
 template <std::size_t N>
-CONSTEVAL auto perform_format(auto s, auto v) -> ct_string<N + 1> {
+CONSTEVAL auto perform_format(auto s, auto const &v) -> ct_string<N + 1> {
     ct_string<N + 1> cts{};
     fmt::format_to(cts.begin(), s, v);
     return cts;
 }
 
-template <ct_string Fmt, typename Arg> constexpr auto format1(Arg arg) {
+template <ct_string Fmt, ct_string Name, std::size_t Start, typename Arg>
+constexpr auto format1(Arg arg) {
     if constexpr (requires { arg_value(arg); }) {
         constexpr auto fmtstr = STDX_FMT_COMPILE(Fmt);
         constexpr auto a = arg_value(arg);
-        if constexpr (is_specialization_of_v<std::remove_cv_t<decltype(a)>,
-                                             format_result>) {
+        using a_t = std::remove_cv_t<decltype(a)>;
+        if constexpr (is_specialization_of_v<a_t, format_result>) {
             constexpr auto s = convert_input(a.str);
             constexpr auto sz = fmt::formatted_size(fmtstr, s);
             constexpr auto cts = perform_format<sz>(fmtstr, s);
-            return format_result{cts_t<cts>{}, a.args};
+            using shifted_named_args_t =
+                detail::apply_offset<Start, 0, typename a_t::named_args_t>;
+            return make_format_result<shifted_named_args_t>(cts_t<cts>{},
+                                                            a.args);
         } else {
             constexpr auto sz = fmt::formatted_size(fmtstr, a);
             constexpr auto cts = perform_format<sz>(fmtstr, a);
-            return format_result{cts_t<cts>{}};
+            if constexpr (not Name.empty()) {
+                using name_info_t = named_arg<Name, a_t, Start, sz>;
+                return make_format_result<type_list<name_info_t>>(cts_t<cts>{});
+            } else {
+                return make_format_result(cts_t<cts>{});
+            }
         }
     } else if constexpr (is_specialization_of_v<Arg, format_result>) {
-        auto const sub_result = format1<Fmt>(arg.str);
-        return format_result{sub_result.str, arg.args};
+        auto const sub_result = format1<Fmt, "", Start>(arg.str);
+        using shifted_named_args_t =
+            detail::apply_offset<Start, 0, typename Arg::named_args_t>;
+        return make_format_result<shifted_named_args_t>(sub_result.str,
+                                                        std::move(arg).args);
     } else {
-        return format_result{cts_t<Fmt>{}, tuple{arg}};
+        if constexpr (not Name.empty()) {
+            using name_info_t = named_arg<Name, Arg, 0>;
+            return make_format_result<type_list<name_info_t>>(
+                cts_t<Fmt>{}, tuple{std::move(arg)});
+        } else {
+            return make_format_result(cts_t<Fmt>{}, tuple{std::move(arg)});
+        }
     }
 }
 
@@ -237,13 +382,24 @@ template <ct_string Fmt> struct fmt_data {
     constexpr static auto fmt = std::string_view{Fmt};
     constexpr static auto N = count_specifiers(fmt);
     constexpr static auto splits = split_specifiers<N + 1>(fmt);
-    constexpr static auto last_cts = to_ct_string<splits[N].size()>(splits[N]);
+    constexpr static auto last_cts =
+        to_ct_string<splits[N].view.size()>(splits[N].view);
 };
 
-template <typename T>
-constexpr auto ct_format_as(T const &t) -> decltype(auto) {
-    return (t);
-}
+[[maybe_unused]] constexpr inline struct format_as_t {
+    template <typename T>
+        requires true
+    constexpr auto operator()(T &&t) const
+        noexcept(noexcept(ct_format_as(std::forward<T>(t))))
+            -> decltype(ct_format_as(std::forward<T>(t))) {
+        return ct_format_as(std::forward<T>(t));
+    }
+
+    template <typename T>
+    constexpr auto operator()(T &&t) const -> decltype(auto) {
+        return T(std::forward<T>(t));
+    }
+} format_as;
 } // namespace detail
 
 template <ct_string Fmt,
@@ -259,19 +415,24 @@ constexpr auto ct_format = [](auto &&...args) {
                   "Format string has a mismatch between the number of format "
                   "specifiers and arguments.");
 
-    [[maybe_unused]] auto const format1 = [&]<std::size_t I>(auto &&arg) {
-        constexpr auto cts =
-            detail::to_ct_string<data::splits[I].size()>(data::splits[I]);
-        return detail::format1<cts>(FWD(arg));
+    [[maybe_unused]] auto const format1 = []<std::size_t I>(auto &&arg) {
+        constexpr auto fmt = detail::extract_format1_str<
+            detail::to_ct_string<data::splits[I].view.size()>(
+                data::splits[I].view),
+            data::splits[I].start>();
+        return detail::format1<fmt.first, fmt.second, data::splits[I].start>(
+            FWD(arg));
     };
 
-    auto const result = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-        using detail::ct_format_as;
-        return (format1.template operator()<Is>(ct_format_as(FWD(args))) + ... +
-                format_result{cts_t<data::last_cts>{}});
-    }(std::make_index_sequence<data::N>{});
+    auto result = [&]<std::size_t... Is>(std::index_sequence<Is...>,
+                                         auto &&...as) {
+        return (format1.template operator()<Is>(detail::format_as(FWD(as))) +
+                ... + make_format_result(cts_t<data::last_cts>{}));
+    }(std::make_index_sequence<data::N>{}, FWD(args)...);
     constexpr auto str = detail::convert_output<result.str.value, Output>();
-    return format_result{str, result.args};
+    using NamedArgs =
+        typename std::remove_cvref_t<decltype(result)>::named_args_t;
+    return make_format_result<NamedArgs>(str, std::move(result).args);
 };
 
 template <ct_string Fmt>
