@@ -104,7 +104,6 @@ constexpr static auto reverse_value_lookup_v =
                   expand<M>())),
               detail::value_t<Default>>::value;
 
-#if __cpp_lib_forward_like < 202207L
 template <typename T, typename U>
 [[nodiscard]] constexpr auto forward_like(U &&u) noexcept -> decltype(auto) {
     constexpr auto t_is_const = std::is_const_v<std::remove_reference_t<T>>;
@@ -113,7 +112,7 @@ template <typename T, typename U>
         if constexpr (t_is_const) {
             return std::as_const(u);
         } else {
-            return (u);
+            return static_cast<U &>(u); // NOLINT(readability-redundant-casting)
         }
     } else {
         if constexpr (t_is_const) {
@@ -123,11 +122,9 @@ template <typename T, typename U>
         }
     }
 }
-#else
-using std::forward_like;
-#endif
+
 template <typename T, typename U>
-using forward_like_t = decltype(forward_like<T>(std::declval<U>()));
+using forward_like_t = decltype(stdx::forward_like<T>(std::declval<U>()));
 
 template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
 [[nodiscard]] constexpr auto as_unsigned(T t) {
@@ -151,7 +148,7 @@ template <typename T, typename U>
     } else if constexpr (sizeof(T) > sizeof(U)) {
         return (sz * sizeof(T) / sizeof(U)) + (sizeof(T) % sizeof(U) > 0);
     } else {
-        return (sz * sizeof(T) + sizeof(U) - 1) / sizeof(U);
+        return ((sz * sizeof(T)) + sizeof(U) - 1) / sizeof(U);
     }
 }
 } // namespace detail
@@ -259,7 +256,6 @@ constexpr auto is_aligned_with = [](auto v) -> bool {
     }
 };
 
-#if __cplusplus >= 202002L
 namespace detail {
 template <typename T> struct ct_helper {
     // NOLINTNEXTLINE(google-explicit-constructor)
@@ -286,8 +282,6 @@ constexpr auto is_ct_v<std::integral_constant<T, V>> = true;
 template <typename T> constexpr auto is_ct_v<type_identity<T>> = true;
 template <typename T> constexpr auto is_ct_v<T const> = is_ct_v<T>;
 
-#endif
-
 template <typename T, T N>
 struct make_integer_sequence : std::make_integer_sequence<T, N> {};
 template <std::size_t N>
@@ -303,12 +297,16 @@ constexpr auto get(make_integer_sequence<T, N>) {
 } // namespace v1
 } // namespace stdx
 
+// NOLINTBEGIN(bugprone-std-namespace-modification)
+
 template <typename T, T N>
 struct std::tuple_size<stdx::make_integer_sequence<T, N>>
     : std::integral_constant<std::size_t, N> {};
 template <std::size_t I, typename T, T N>
 struct std::tuple_element<I, stdx::make_integer_sequence<T, N>>
     : stdx::type_identity<std::integral_constant<T, I>> {};
+
+// NOLINTEND(bugprone-std-namespace-modification)
 
 // NOLINTBEGIN(cppcoreguidelines-macro-usage)
 
@@ -342,8 +340,6 @@ struct std::tuple_element<I, stdx::make_integer_sequence<T, N>>
         STDX_PRAGMA(diagnostic pop)                                            \
     }()
 #endif
-
-#if __cplusplus >= 202002L
 
 #ifndef CT_WRAP
 #define CT_WRAP(...)                                                           \
@@ -403,7 +399,6 @@ auto cx_detect(auto f) {
         STDX_PRAGMA(diagnostic pop)                                            \
     })
 
-#endif
 #endif
 
 // NOLINTEND(cppcoreguidelines-macro-usage)

@@ -40,7 +40,7 @@ class bitset {
 
     constexpr static auto lastmask = []() -> elem_t {
         if constexpr (N % storage_elem_size != 0) {
-            return allbits >> (storage_elem_size - N % storage_elem_size);
+            return allbits >> (storage_elem_size - (N % storage_elem_size));
         } else {
             return allbits;
         }
@@ -69,13 +69,6 @@ class bitset {
         }
         return lhs.highbits() == rhs.highbits();
     }
-
-#if __cpp_impl_three_way_comparison < 201907L
-    [[nodiscard]] friend constexpr auto operator!=(bitset const &lhs,
-                                                   bitset const &rhs) -> bool {
-        return not(lhs == rhs);
-    }
-#endif
 
     friend constexpr auto operator|(bitset lhs, bitset const &rhs) -> bitset {
         lhs |= rhs;
@@ -192,10 +185,8 @@ class bitset {
         }
     }
 
-#if __cplusplus >= 202002L
     constexpr explicit bitset(ct_string<N + 1> s)
         : bitset{static_cast<std::string_view>(s)} {}
-#endif
 
     template <typename T> [[nodiscard]] constexpr auto to() const -> T {
         if constexpr (N == 0) {
@@ -479,9 +470,7 @@ template <typename T, typename F, typename R, auto M, typename... S>
     }
 }
 
-#if __cplusplus >= 202002L
 template <std::size_t N> bitset(ct_string<N>) -> bitset<N - 1>;
-#endif
 
 namespace detail {
 template <typename...> constexpr std::size_t index_of = 0;

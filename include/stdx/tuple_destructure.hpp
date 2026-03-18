@@ -1,13 +1,13 @@
 #pragma once
 
-#if __cplusplus >= 202002L
-
 #include <stdx/tuple.hpp>
 
 #include <cstddef>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+
+// NOLINTBEGIN(bugprone-std-namespace-modification)
 
 template <typename... Ts>
 struct std::tuple_size<stdx::tuple<Ts...>>
@@ -26,4 +26,4 @@ struct std::tuple_element<I, stdx::indexed_tuple<IL, Ts...>>
           std::remove_cvref_t<decltype(std::declval<stdx::indexed_tuple<
                                            IL, Ts...>>()[stdx::index<I>])>> {};
 
-#endif
+// NOLINTEND(bugprone-std-namespace-modification)
